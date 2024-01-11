@@ -1,0 +1,30 @@
+name: micasenseGeoreferencing
+channels:
+  - conda-forge
+dependencies:
+  - python=3.8
+  - gdal
+  - rasterio
+  - opencv
+  - jupyter
+  - matplotlib
+  - scikit-image
+  - scikit-learn
+  - imageio
+  - git
+  - git-lfs
+  - pandas
+  - nb_conda
+  - pytest
+  - pytest-xdist
+  - pip
+  - requests
+  - packaging
+  - tqdm
+  - pip:
+      - pysolar
+      - pyzbar
+      - pyexiftool<=0.4.13
+      - jenkspy
+      - rawpy
+      - cameratransform

@@ -13,8 +13,66 @@ from tqdm import tqdm
 from PIL import Image
 from math import ceil
 from scipy.optimize import curve_fit
+import re
 import micasense.imageutils as imageutils
 
+# helper function that is only relevant to my file naming
+def get_heights(imagePath, flight_attributes_df):
+    """ 
+    :param imagePath (str): image directory
+    :param flight_attributes_df (pd.DataFrame): df that contains POS data, image file name
+    """
+    measuredHeight = np.median(flight_attributes_df['altitude'])
+    # where the folder name contains the flight height information e.g. ...15H...25H...
+    actualHeight = int(re.search('[0-9][0-9]H',os.path.dirname(imagePath)).group(0).replace('H',''))
+    DEM_offset_height = int(measuredHeight - actualHeight)
+    print(f'offset height: {DEM_offset_height}m')
+    return {'measuredHeight':measuredHeight, 
+    'actualHeight':actualHeight, 
+    'height_max':np.max(flight_attributes_df['altitude'].values),
+    'height_min':np.min(flight_attributes_df['altitude'].values),
+    'DEM_offset_height':DEM_offset_height}
+
+def plot_height(imagePath, flight_attributes_df,height_dict):
+    """ 
+    plot height with image index
+    identify median height and get height info from the folder
+    """
+    # plot
+    plt.figure()
+    plt.plot(flight_attributes_df.index.to_list(),flight_attributes_df['altitude'])
+    height_max = height_dict['height_max']
+    height_min = height_dict['height_min']
+    measuredHeight = height_dict['measuredHeight']
+    actualHeight = height_dict['actualHeight']
+    DEM_offset_height = height_dict['DEM_offset_height']
+    plt.axhline(y=measuredHeight, ls='--',c='k',label=r'Median $Height_{GPS}$:' f" {int(measuredHeight)}m\n(offset height = {DEM_offset_height}m)")
+    plt.title(r'Max $Height_{GPS}$:' + f' {height_max:.1f}m, ' + r'Min $Height_{GPS}$: ' + f'{height_min:.1f}m\n' + r'$Height_{UAV}$:' +f'{actualHeight}m')
+    plt.ylabel(r'$Height_{GPS}$ (m)')
+    plt.xlabel('Image index')
+    plt.legend()
+    # save fig
+    parentDir = os.path.join(os.path.dirname(imagePath),"images")
+    os.mkdir(parentDir) if not os.path.exists(parentDir) else None
+    fname = os.path.join(parentDir,f'height_timeseries.png')
+    plt.savefig(fname)
+    plt.show()
+    return
+
+def readSelectedGPS(imagePath):
+    """
+    select GPS points from select_GPS.py
+    returns flight_points which corresponds to the image index
+    """
+    fp = os.path.join(os.path.dirname(imagePath),'flight_attributes','gps_index.txt')
+    with open(fp, "r") as output:
+        idx_list = output.readlines()
+    intList = sorted([int(i.replace('\n','')) for i in idx_list])
+    print(intList)
+    assert len(intList)%2 == 0, "number of GPS points must be even as one flight light has start and end point"
+    n = len(intList)//2
+    listIndex = [np.arange(intList[i*2],intList[i*2+1]+1).tolist() for i in range(n)]
+    return [i for l in listIndex for i in l]
 class DetectLines:
     def __init__(self,df, n = 3, thresh=0.99, plot = True):
         """ 
@@ -72,24 +130,33 @@ class DetectLines:
                 filtered_idx_list.append(i)
         return filtered_idx_list
     
-    def get_points(self):
+    def get_points(self, flight_points = None):
         """ 
         identify points in lines that are parallel to each other
         returns a list of indices
         """
-        filtered_idx_list = self.get_filtered_points()
+        if flight_points is None:
+            filtered_idx_list = self.get_filtered_points()
+        else:
+            filtered_idx_list = flight_points
         
         if self.plot is True:
             lon = self.df.longitude.to_numpy()
             lat = self.df.latitude.to_numpy()
             plt.figure(figsize=(10,10))
             plt.plot(lon,lat)
-            plt.plot([i['lon'] for i in filtered_idx_list],[i['lat'] for i in filtered_idx_list],'r.',label='detected points')
+            if flight_points is None:
+                plt.plot([i['lon'] for i in filtered_idx_list],[i['lat'] for i in filtered_idx_list],'r.',label='detected points')
+            else:
+                plt.plot([lon[i] for i in filtered_idx_list],[lat[i] for i in filtered_idx_list],'r.',label='detected points')
             plt.legend()
             plt.xlabel('Longitude')
             plt.xlabel('Latitude')
             plt.show()
-        return [i['index'] for i in filtered_idx_list]
+        if flight_points is None:
+            return [i['index'] for i in filtered_idx_list]
+        else:
+            return filtered_idx_list
     
     def get_start_stop_indices(self):
         """ 
@@ -452,6 +519,125 @@ def interpolate_timestamp(df,column_names = ['latitude','longitude','altitude','
     
     return og_df, interpolated_df
 
+class InterpolateCoordinates:
+    def __init__(self, df,method='linear', interpolate_distance = 0.1, pad_distance = 1, estimate_angle="yaw"):
+        """ 
+        :param method (str): linear, nearest, cubic
+        :param pad_distance (float): extend values backwards and forwards by pad_distance
+        :param estimate_angle (str): yaw or coord
+        sampling equidistantly based on fixed time intervals between 2 points should be avoided 
+        because where the distance is larger for 2 points, the correction in GPS will be greater too
+        the image will be shifted for pictures with smaller distance between 2 points
+        """
+        self.df = df
+        self.method = method
+        self.interpolate_distance = interpolate_distance
+        self.pad_distance = pad_distance
+        self.lat = self.df['latitude'].to_numpy()#.reshape(-1,1)
+        self.lon = self.df['longitude'].to_numpy()#.reshape(-1,1)
+        self.estimate_angle = estimate_angle
+    
+    def get_cum_distance(self):
+        coord_stack = np.hstack([self.lat.reshape(-1,1),self.lon.reshape(-1,1)])
+        distance = np.sum(np.diff(coord_stack,axis=0)**2,axis=1) #distance between two adjacent points
+        distance = distance**(1/2)
+        distance_median = np.median(distance) # median distance since stationary GPS points will skew when calculating avg
+        distance_normalised = distance/distance_median #normalise the distance so the median distance between images is 1
+        distance_cum_sum = np.cumsum(distance_normalised)
+        # append 0 to cum sum array since it has one less data point than lat/lon since distance is calculated between the coords
+        distance_cum_sum = np.append([0],distance_cum_sum)
+        return distance_cum_sum
+    
+    def interpolate_coordinates(self):
+        """ 
+        :param pad_distance (float): for the points with only one adjacent values (e.g. first and last points), pad those with pad_distance for interpolation between 2 points
+        """
+        cum_distance = self.get_cum_distance()
+        n = cum_distance.shape[0]
+        # initialise dict
+        interp_dist_dict = dict() #where keys correspond to the image index (may not necessarily be image name if some images are missing)
+        # interp_dist_dict[0] = {'latitude': self.lat[0], 'longitude':self.lon[0]}
+        # interp_dist_dict[n-1] = {'latitude': self.lat[n-1], 'longitude':self.lon[n-1]}
+
+        def interpolate_lat(x):
+            return np.interp(x, cum_distance, self.lat)
+        
+        def interpolate_lon(x):
+            return np.interp(x, cum_distance, self.lon)
+        
+        for i in range(n):
+            # prev_dist = cum_distance[i-1]
+            current_dist = cum_distance[i]
+            # next_dist = cum_distance[i+1]
+            # interpolation between adjacent coordinates may not be ideal 
+            # if two points are very close together because the drone is hovering
+            # so the interpolation may not be much, we cant shift the images much forward/backwards
+            
+            # interpolate the distance backward
+            backward_interpolated_x = np.arange(current_dist-self.pad_distance,current_dist, self.interpolate_distance)
+            # interpolate distance forward
+            forward_interpolated_x = np.arange(current_dist,current_dist+self.pad_distance,self.interpolate_distance)
+            # keep track of index that maps to the original cum distance, this helps us to easily shift the coordinates wrt to the original index
+            # indexOfCurrentCoord = backward_interpolated_x.shape[0] #since pad_distance is the same, the original index is always in the middle of the array
+            # concat the interpolated values so interpolation can be done at one go
+            interpolated_x = np.hstack([backward_interpolated_x,forward_interpolated_x])
+            
+            # dist_x = cum_distance[i-1:i+2]
+            # lat_y = self.lat[i-1:i+2]
+            # lon_y = self.lon[i-1:i+2]
+            interpolated_lat = interpolate_lat(interpolated_x)
+            interpolated_lon = interpolate_lon(interpolated_x)
+            interp_dist_dict[i] = {'latitude': interpolated_lat, 'longitude': interpolated_lon}
+
+        return interp_dist_dict
+    
+    def append_flight_angle(self):
+        """calculate flight angle (in degrees) and append to the df"""
+        if self.estimate_angle == "yaw":
+            self.df['flight_angle'] = -self.df['dls-yaw']/np.pi*180
+        else:
+            column_idx = [i for i,c in enumerate(self.df.columns.to_list()) if c in ['latitude','longitude']]
+            angle_coord_list = []
+            for i,rows in tqdm(self.df.iterrows()):
+                if (i == 0) or (i == len(self.df.index)-1):
+                    # since the first and last points do not have adjacent points, use yaw instead
+                    angle_coord_list.append(-rows['dls-yaw']/np.pi*180)
+                else:
+                    # estimate flight angle from 2 adjacent coordinates
+                    flight_att_diff = self.df.iloc[[i-1,i+1],column_idx]
+                    flight_att_diff = flight_att_diff.iloc[:,:2].values
+                    flight_angle_coord = get_flight_angle(flight_att_diff)
+                    north_vec, east_vec = get_flight_direction(flight_att_diff)
+                    if east_vec < 0:
+                        flight_angle = flight_angle_coord # means rotation of image is positive (acw)
+                    else:
+                        flight_angle = -flight_angle_coord # means rotation of image is negative (cw)
+                    angle_coord_list.append(flight_angle)
+            self.df['flight_angle'] = angle_coord_list
+    
+    def get_interpolated_dict(self):
+        """ returns a dict of interpolated coordinates per image index"""
+        # get flight_angle
+        self.append_flight_angle()
+        return self.interpolate_coordinates()
+    
+    def shift_coord(self,interp_dist_dict,shift_n=0):
+        """ 
+        :param interp_dist_dict (dict): output from
+        :param shift_n (int): if positive, interpolate forward, if negative, interpolate backwards
+        """
+        originalIndex = interp_dist_dict[0]['latitude'].shape[0]//2
+        
+        assert abs(shift_n) < originalIndex, f'shift_n: {shift_n} is > interpolated length: {originalIndex}. Select shift_n to be < {originalIndex} or reduce interpolate_distance or increase pad_distance'
+        
+        lat_list = [coord_dict['latitude'][originalIndex+shift_n] for coord_dict in interp_dist_dict.values()]
+        lon_list = [coord_dict['longitude'][originalIndex+shift_n] for coord_dict in interp_dist_dict.values()]
+
+        df_copy = self.df.copy()
+        df_copy['latitude'] = lat_list
+        df_copy['longitude'] = lon_list
+        
+        return df_copy
 class InterpolateFlight:
     def __init__(self, df, interpolate_milliseconds=100, estimate_angle = "yaw",column_names = ['latitude','longitude','altitude','flight_angle','north_vec','east_vec']):
         """ 
