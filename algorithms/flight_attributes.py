@@ -602,9 +602,10 @@ class InterpolateFlight:
         return df_interpolated
     
 class PlotGeoreference:
-    def __init__(self, flight_attributes_df, fp_list, wql_dict = None,DEM_offset_height = 15):
+    def __init__(self, imagePath, flight_attributes_df, wql_dict = None):
         """ 
-        :param flight_attributes_df (pd.DataFrame):  dataframe with flight angle, north_vec, east_vec e.g. df_interpolated
+        :param imagePath (str): directory path where images are stored
+        :param flight_attributes_df (pd.DataFrame):  dataframe with image_name, flight angle, north_vec, east_vec e.g. df_interpolated
         :param fp_list (list of fp): filepath of the thumbnail
         :param wql_dict (dict): where keys are: lat, lon, measurements
         :param geotransform_list (dict): 
@@ -615,11 +616,9 @@ class PlotGeoreference:
             where each value is an image
         returns an np.ndarray
         """
+        self.imagePath = imagePath
         self.flight_attributes_df = flight_attributes_df
         self.wql_dict = wql_dict
-        # where keys are image index extracted from the image_name from fp_list
-        self.fp_list = {int(os.path.splitext(os.path.split(fp)[-1])[0].split('_')[1]):fp for fp in fp_list}
-        self.DEM_offset_height = DEM_offset_height
         self.rgb_bands = [2,1,0]
 
     def normalise_image(self,im_rgb,p_min=0.1,p_max=95):
@@ -641,25 +640,29 @@ class PlotGeoreference:
         returns a dict, where keys are image_index that corresponds to image_name,
             values are lat, lon, lat_res, lon_res, flight_angle, image_fp
         """
-        column_idx = [i for i,c in enumerate(self.flight_attributes_df.columns.to_list()) if c in ['latitude','longitude','altitude','flight_angle']]
+        # column_idx = [i for i,c in enumerate(self.flight_attributes_df.columns.to_list()) if c in ['image_name','latitude','longitude','altitude','flight_angle']]
 
         # im_list = dict()
         geotransform_list = dict()
 
         for i,rows in self.flight_attributes_df.iterrows():
-            # flight_att = rows[column_idx].tolist()
-            lat, lon, altitude, flight_angle = rows[column_idx].tolist()
-            # flight_att[-2] = flight_att[-2] - self.DEM_offset_height
-            # flight_angle_coord = rows['flight_angle']
-            # flight_angle_coord = flight_angle_coord + 90 if flight_angle_coord > 90 else 90 - flight_angle_coord
-            # if (rows['north_vec'] > 0 and rows['east_vec'] > 0) or (rows['north_vec'] < 0 and rows['east_vec'] < 0):
-            #     flight_angle_coord = (flight_angle_coord + 180)%360
-            GI = GeotransformImage(None, lat, lon, altitude = altitude - self.DEM_offset_height, angle = flight_angle)
+            
+            lat = rows['latitude']
+            lon = rows['longitude']
+            altitude = rows['altitude']
+            flight_angle = rows['flight_angle']
+
+            image_name = os.path.splitext(rows['image_name'])[0] #image name without extension
+            image_fp = os.path.join(self.imagePath,'thumbnails',f'{image_name}.jpg')
+            img_idx = int(image_name.split('_')[1])
+
+            GI = GeotransformImage(None, lat, lon, altitude = altitude, angle = flight_angle)
+            
             lat_res, lon_res = GI.get_degrees_per_pixel()
-            lat, lon = rows['latitude'], rows['longitude']
-            img_idx = int(os.path.splitext(rows['image_name'])[0].split('_')[1])
+            
             geotransform_list[img_idx] = {'lat':lat,'lon':lon,'lat_res':lat_res,'lon_res':lon_res,
-                                    'flight_angle': flight_angle, 'image_fp':self.fp_list[img_idx]}
+                                    'flight_angle': flight_angle, 'image_fp':image_fp}
+            
         return geotransform_list
 
     def get_canvas(self,scale_factor=1.05):
@@ -689,7 +692,8 @@ class PlotGeoreference:
         
         im_list = dict()
         for im_type, coord_type in zip(['upper_lat','lower_lat','left_lon','right_lon'],[lat_max,lat_min,lon_min,lon_max]):
-            fp = self.fp_list[coord_type[0]]
+            # fp = self.fp_list[coord_type[0]]
+            fp = geotransform_list[coord_type[0]]['image_fp']
             if fp.endswith('.tif') or fp.endswith('.jpg'):
                 im = np.asarray(Image.open(fp))
             elif fp.endswith('.ob'):
@@ -789,23 +793,23 @@ class PlotGeoreference:
         """
         im_display = self.get_canvas()
         geotransform_list = self.get_flight_attributes()
-        column_idx = [i for i,c in enumerate(self.flight_attributes_df.columns.to_list()) if c in ['latitude','longitude']]
+        # column_idx = [i for i,c in enumerate(self.flight_attributes_df.columns.to_list()) if c in ['latitude','longitude']]
         for i, rows in self.flight_attributes_df.iterrows():
-            flight_angle_coord = rows['flight_angle']
-            # flight_angle_coord = flight_angle_coord + 90 if flight_angle_coord > 90 else 90 - flight_angle_coord
-            # if (rows['north_vec'] > 0 and rows['east_vec'] > 0) or (rows['north_vec'] < 0 and rows['east_vec'] < 0):
-            #     flight_angle_coord = (flight_angle_coord + 180)%360
-            img_idx = int(os.path.splitext(rows['image_name'])[0].split('_')[1])
-            fp = self.fp_list[img_idx]
+            flight_angle = rows['flight_angle']
+
+            image_name = os.path.splitext(rows['image_name'])[0] #image name without extension
+            fp = os.path.join(self.imagePath,'thumbnails',f'{image_name}.jpg')
+            img_idx = int(image_name.split('_')[1])
+
             # print(rows['image_name'], fp)
             if fp.endswith('.tif') or fp.endswith('.jpg'):
-                im = np.asarray(Image.open(fp)) if (os.path.splitext(rows['image_name'])[0] in fp) else None
+                im = np.asarray(Image.open(fp)) if (image_name in fp) else None
             elif fp.endswith('.ob'):
                 im = mutils.load_pickle(fp)
                 im = np.take(im,self.rgb_bands,axis=2)
             if im is None:
                 raise NameError("image is None because filepath does not match image name")
-            GI = GeotransformImage(im,None,None,None,angle=flight_angle_coord)
+            GI = GeotransformImage(im,None,None,None,angle=flight_angle)
             rot_im = GI.affine_transformation(plot=False)
             # rot_im = np.fliplr(np.flipud(rot_im))
             
