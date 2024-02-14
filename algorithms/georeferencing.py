@@ -91,3 +91,83 @@ def directGeoreferencing_gdal(imagePath,image_name,lat,lon,alt,flight_angle,dirn
                                 altitude = alt,
                                 angle = flight_angle)
     GI.georegister(image_fn)
+
+class MosaicSeadron:
+    def __init__(self,lat,lon,alt,flight_angle,focal=5.4,sensor_size=(3.75, 3.75),original_image_size=(1280,960),cropped_dimensions=(4, 6, 1240, 920)):
+        """ 
+        :param focal (float): local length of camera
+        :param original_image_size (tuple): original image_size = ImageWidth, ImageHeight
+        :param alt (float): flight altitude
+        :param flight_angle (float): in degrees, UAV's yaw converted to degrees
+        :param sensor_size (mm per pixel): e.g. sensor_size=(4.8,3.6)
+        :param cropped_dimensions (tuple of int): left, top, w, h (this is the cropped dimensions of dual camera system, it may be different for RedEdge cropped dimensions)
+        this function georeferences one image
+        modified from georeferencing code - MosaicSeadron
+        im_cropped = img[top:top+h, left:left+w]
+        """
+        self.lat = lat
+        self.lon = lon
+        self.alt = alt
+        self.flight_angle = flight_angle
+        self.focal = focal
+        self.sensor_size = sensor_size
+        self.original_image_size = original_image_size
+        self.cropped_dimensions = cropped_dimensions
+
+    def get_cam(self):
+        """ get camera that is oriented towards north"""
+        cam = ct.Camera(ct.RectilinearProjection(focallength_mm=self.focal,
+                                                sensor = self.sensor_size,
+                                                image=self.original_image_size),
+                        #0°: the camera faces “north”, 
+                        #90°: east, 
+                        # 180°: south, 
+                        # 270°: west
+                        ct.SpatialOrientation(elevation_m=self.alt,
+                                            tilt_deg=0,
+                                            roll_deg=0,
+                                        heading_deg=self.flight_angle))
+        
+        cam.setGPSpos(self.lat, self.lon, self.alt) #cam coord matches with the image's center GPS coordinate
+
+        return cam
+    
+    def get_gcps(self):
+        cam = self.get_cam()
+        # Image corners coordinates
+        # UL (upper left), UR (upper right), LR (lower right), LL (lower left)
+
+        coords = np.array([cam.gpsFromImage([0, 0]), 
+                           cam.gpsFromImage([self.original_image_size[0] - 1, 0]), 
+                           cam.gpsFromImage([self.original_image_size[0] - 1, self.original_image_size[1] - 1]), 
+                           cam.gpsFromImage([0, self.original_image_size[1] - 1])])
+        
+        gcp1 = rasterio.control.GroundControlPoint(row = 0, col = 0, x = coords[0, 1], y = coords[0, 0], z = coords[0, 2])
+        gcp2 = rasterio.control.GroundControlPoint(row = self.original_image_size[0] - 1, col = 0, x = coords[1, 1], y = coords[1, 0], z = coords[1, 2])
+        gcp3 = rasterio.control.GroundControlPoint(row = self.original_image_size[0] - 1, col = self.original_image_size[1] - 1, x = coords[2, 1], y = coords[2, 0], z = coords[2, 2])
+        gcp4 = rasterio.control.GroundControlPoint(row = 0, col = self.original_image_size[1] - 1, x = coords[3, 1], y = coords[3, 0], z = coords[3, 2])
+
+        return [gcp1, gcp2, gcp3, gcp4]
+    
+
+    def get_affine_transform(self):
+        return rasterio.transform.from_gcps(self.get_gcps())
+    
+    def georeference(self, imagePath, image_name):
+        tsfm = self.get_affine_transform()
+
+        # Opening the original Image and generating a profile based on flight_stacks file generated before
+        with rasterio.open(os.path.join(imagePath,'stacks',image_name), 'r') as src:
+            profile = src.profile
+
+            crs = rasterio.crs.CRS({"init": "epsg:4326"})
+            profile.update(dtype=rasterio.uint16, transform = tsfm, crs=crs)
+
+            georeferenced_stack_dir = os.path.join(imagePath, 'georeferenced_stack')
+            if not os.path.exists(georeferenced_stack_dir):
+                os.mkdir(georeferenced_stack_dir)
+                
+            with rasterio.open(os.path.join(georeferenced_stack_dir, image_name), 'w', **profile) as dst:
+                dst.write(np.flip(src.read().astype(rasterio.uint16),axis=1))
+        
+        return
