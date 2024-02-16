@@ -288,7 +288,10 @@ def get_all_dir(fp,iter=3):
     return '_'.join(reversed(sub_dir_list))
 
 def get_ground_resolution(height,pixel_size=3.75,focal_length=5.4,fov_x=47.2,fov_y=35.4,p_x=1280,p_y=960):
-    """returns ground resolution for MicaSense in the x and y direction (in meters)"""
+    """
+    specifications: https://support.micasense.com/hc/en-us/articles/360011389334-RedEdge-MX-Integration-Guide
+    returns ground resolution for MicaSense in the x and y direction (in meters)
+    """
     # s_x = (pixel_size*p_x)/1000
     # s_y = (pixel_size*p_y)/1000
     # fov_x = 2*np.arctan(s_x/(2*focal_length))*180/np.pi

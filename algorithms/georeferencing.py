@@ -3,15 +3,19 @@ import numpy as np
 import pandas as pd
 import os
 import rasterio
+from osgeo import gdal
 from PIL import Image
 import glob
 import contextlib
 import pickle
 from math import ceil
+import cv2
 import matplotlib.pyplot as plt
 import algorithms.plot_map as plot_map
 import algorithms.flight_attributes as FlightAttributes
 import algorithms.select_GPS as SelectGPS
+from algorithms.plot_map import PlotMap
+from algorithms.alignment_error import correlation_coefficient
 
 def directGeoreferencing_rasterio(imagePath,image_name,focal,lat,lon,alt,flight_angle,original_image_size=(1280,960),cropped_dimensions=(4, 6, 1240, 920)):
     """ 
@@ -183,12 +187,14 @@ class BatchCorrect:
         self.ne = ne_point
         self.sw = sw_point
         geotransform_list = self.get_geotransform(df_cropped)
-        GR = plot_map.GeoreferenceRaster(ne_point,sw_point,canvas,geotransform_list)
+        GR = GeoreferenceRaster(ne_point,sw_point,canvas,geotransform_list)
         im_display, cc_list = GR.georeference_UAV(calculate_correlation=calculate_correlation)
         return im_display, cc_list
     
     def plot_params(self, PM, ax, ax_idx, title):
-        
+        """ 
+        :param PM (PlotMap class)
+        """
         tickFontSize = 7
         tick_breaks = 4
         NorthFontSize = 7
@@ -325,9 +331,104 @@ class BatchCorrect:
         # create gifs
         makeGif(parentDir,self.dirName)
 
+class GeoreferenceRaster:
+    def __init__(self, ne, sw, canvas, geotransform_list):
+        self.ne = ne
+        self.sw = sw
+        self.canvas = canvas
+        self.geotransform_list = geotransform_list
+        self.canvas_height = canvas.shape[0]
+        self.canvas_width = canvas.shape[1]
+        self.canvas_lat_res = (self.ne[0] - self.sw[0])/self.canvas_height
+        self.canvas_lon_res = (self.ne[1] - self.sw[1])/self.canvas_width
+        self.upper_lat = self.ne[0]
+        self.left_lon = self.sw[1]
+
+    def get_UAV_res(self):
+        """ 
+        obtain the smallest resolution in UAV imagery 
+        latitude and longitude pixel resolution must be the same becus in QGIS both resolution are the same
+        """
+        pixel_res = 1
+        # get the max and min lat and lon values, and the corresponding im idx
+        for idx, gt in self.geotransform_list.items():
+            if gt['lat_res'] < pixel_res:
+                pixel_res = gt['lat_res']
+            if gt['lon_res'] < pixel_res:
+                pixel_res = gt['lon_res']
+
+        self.pixel_res = pixel_res
+        
+        return pixel_res
+    
+    def resize_canvas(self):
+        """ bring UAV imagery and base map to the same lat and lon res """
+        pixel_res = self.get_UAV_res()
+        height_resize = int((self.canvas_lat_res/pixel_res)*self.canvas_height)
+        width_resize = int((self.canvas_lon_res/pixel_res)*self.canvas_width)
+        return cv2.resize(self.canvas, (width_resize, height_resize))
+    
+    def get_row_col_index(self, lat, lon, rot_im):
+        """ 
+        :param lat (float): center coord of rot_im
+        :param lon (float): center coord of rot_im
+        :param rot_im (np.ndarray): rotated image
+        returns the upp/low row and column index when provided center lat and lon values
+        """
+        nrow, ncol = rot_im.shape[0], rot_im.shape[1]
+        row_idx = int((self.upper_lat - lat)/self.pixel_res)
+        col_idx = int((lon - self.left_lon)/self.pixel_res)
+        #row_idx and col_idx wrt to center coord
+        upper_row_idx = row_idx - nrow//2
+        upper_row_idx = 0 if upper_row_idx < 0 else upper_row_idx
+        lower_row_idx = upper_row_idx + nrow
+        left_col_idx = col_idx - ncol//2
+        left_col_idx = 0 if left_col_idx < 0 else left_col_idx
+        right_col_idx = left_col_idx + ncol
+        return upper_row_idx, lower_row_idx, left_col_idx, right_col_idx
+    
+    def georeference_UAV(self,calculate_correlation=False):
+        """
+        overlay UAV imagery over basemap
+        """
+        im_display = self.resize_canvas()
+        im_display_copy = im_display.copy()
+        cc_list = []
+        for idx, gt in self.geotransform_list.items():
+            flight_angle = gt['flight_angle']
+            fp = gt['image_fp']
+            
+            if fp.endswith('.tif') or fp.endswith('.jpg'):
+                im = np.asarray(Image.open(fp)) if (os.path.exists(fp)) else None
+            
+            if im is None:
+                raise NameError("image is None because filepath d.n.e")
+            GI = FlightAttributes.GeotransformImage(im,None,None,None,angle=flight_angle)
+            rot_im = GI.affine_transformation(plot=False)
+            upper_row_idx, lower_row_idx, left_col_idx, right_col_idx = self.get_row_col_index(gt['lat'],gt['lon'],rot_im) #row/col idx wrt to center coord
+            background_im = im_display[upper_row_idx:lower_row_idx,left_col_idx:right_col_idx,:]
+            assert rot_im.shape == background_im.shape, f'shapes are diff {rot_im.shape} {background_im.shape}'
+            if calculate_correlation is True:
+                cc = correlation_coefficient(im_display_copy[upper_row_idx:lower_row_idx,left_col_idx:right_col_idx,0],rot_im[:,:,0])
+                cc_list.append((fp,cc))
+            overlay_im = np.where(rot_im == 0, background_im,rot_im)
+            im_display[upper_row_idx:lower_row_idx,left_col_idx:right_col_idx,:] = overlay_im
+
+        return im_display, cc_list
+    
+    def plot(self,ax=None,add_ticks=True, add_compass=True, add_scale_bar=True,calculate_correlation=False):
+        """ plot the georeferenced raster using the PlotMap plot method """
+        im_display, cc_list = self.georeference_UAV(calculate_correlation)
+        PM = PlotMap(self.ne,self.sw,im_display)
+        PM.plot(ax=ax,
+                add_ticks=add_ticks,
+                add_compass=add_compass,
+                add_scale_bar=add_scale_bar)
+        return cc_list
 
 class MosaicSeadron:
-    def __init__(self,lat,lon,alt,flight_angle,flight_angle_correction = -90,focal=5.4,sensor_size=(3.75, 3.75),original_image_size=(1280,960),cropped_dimensions=(4, 6, 1240, 920)):
+    """ MosaicSeadron georeferencing method"""
+    def __init__(self,lat,lon,alt,flight_angle,flight_angle_correction = -90,focal=5.4,sensor_size=(4.8,3.6),original_image_size=(1280,960),cropped_dimensions=(4, 6, 1240, 920)):
         """ 
         :param focal (float): local length of camera
         :param original_image_size (tuple): original image_size = ImageWidth, ImageHeight
@@ -406,7 +507,12 @@ class MosaicSeadron:
     def get_affine_transform(self):
         return rasterio.transform.from_gcps(self.get_gcps())
     
-    def georeference(self, imagePath, image_name):
+    def georeference(self, imagePath, image_name, dir_name):
+        """ 
+        :param imagePath (str): directory to image folder
+        :param image_name (str): name of UAV image with .tif extension
+        :param dir_name (str): name of directory folder
+        """
         tsfm = self.get_affine_transform()
 
         # Opening the original Image and generating a profile based on flight_stacks file generated before
@@ -416,7 +522,7 @@ class MosaicSeadron:
             crs = rasterio.crs.CRS({"init": "epsg:4326"})
             profile.update(dtype=rasterio.uint16, transform = tsfm, crs=crs)
 
-            georeferenced_stack_dir = os.path.join(imagePath, 'georeferenced_stack')
+            georeferenced_stack_dir = os.path.join(imagePath, dir_name)
             if not os.path.exists(georeferenced_stack_dir):
                 os.mkdir(georeferenced_stack_dir)
                 
@@ -424,3 +530,44 @@ class MosaicSeadron:
                 dst.write(np.flip(src.read().astype(rasterio.uint16),axis=1))
         
         return
+    
+def get_MosaicSeadron_geotransform_list(imagePath,flight_attributes_df, dir_name, 
+                                        flight_angle_correction = -90, original_image_size = (1239,919)):
+    """ 
+    :param imagePath (str): directory path where images are stored
+    :param flight_attributes_df (pd.DataFrame):  dataframe with image_name, flight angle
+    :param dir_name (str): name of directory folder
+    """
+    geotransform_list = dict()
+    for image_index, rows in flight_attributes_df.iterrows():
+        image_name = rows['image_name']
+        flight_angle = rows['flight_angle']
+        
+        # georeference each UAV image
+        RG = MosaicSeadron(rows['latitude'],
+                                          rows['longitude'],
+                                          rows['altitude'],
+                                          flight_angle = flight_angle,
+                                          flight_angle_correction = flight_angle_correction,
+                                          original_image_size = original_image_size)
+        RG.georeference(imagePath, image_name, dir_name)
+        
+        # open georeferenced image
+        image_fp = os.path.join(imagePath,dir_name,image_name)
+        ds = gdal.Open(image_fp)
+        # get attributes
+        width = ds.RasterXSize
+        height = ds.RasterYSize
+        gt = ds.GetGeoTransform()
+        UL_lon = gt[0]
+        UL_lat = gt[3]
+        lon_res = gt[1]
+        lat_res = gt[5]
+        lat = UL_lat + lat_res*height/2
+        lon = UL_lon + lon_res*width/2
+        thumbnail_fn = f'{os.path.splitext(image_name)[0]}.jpg'
+        image_fp = os.path.join(imagePath,'thumbnails',thumbnail_fn)
+        geotransform_list[image_index] = {'lat': lat, 'lon': lon, 
+                'lat_res': abs(lat_res), 'lon_res': abs(lon_res), 
+                'flight_angle': flight_angle, 'image_fp': image_fp}
+    return geotransform_list

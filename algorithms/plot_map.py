@@ -4,7 +4,7 @@ import numpy as np
 import os
 import PIL.Image as Image
 import math
-import cv2
+
 import algorithms.flight_attributes as FlightAttributes
 from algorithms.alignment_error import correlation_coefficient
 
@@ -144,97 +144,3 @@ class PlotMap:
         return
         
 
-class GeoreferenceRaster:
-    def __init__(self, ne, sw, canvas, geotransform_list):
-        self.ne = ne
-        self.sw = sw
-        self.canvas = canvas
-        self.geotransform_list = geotransform_list
-        self.canvas_height = canvas.shape[0]
-        self.canvas_width = canvas.shape[1]
-        self.canvas_lat_res = (self.ne[0] - self.sw[0])/self.canvas_height
-        self.canvas_lon_res = (self.ne[1] - self.sw[1])/self.canvas_width
-        self.upper_lat = self.ne[0]
-        self.left_lon = self.sw[1]
-
-    def get_UAV_res(self):
-        """ 
-        obtain the smallest resolution in UAV imagery 
-        latitude and longitude pixel resolution must be the same becus in QGIS both resolution are the same
-        """
-        pixel_res = 1
-        # get the max and min lat and lon values, and the corresponding im idx
-        for idx, gt in self.geotransform_list.items():
-            if gt['lat_res'] < pixel_res:
-                pixel_res = gt['lat_res']
-            if gt['lon_res'] < pixel_res:
-                pixel_res = gt['lon_res']
-
-        self.pixel_res = pixel_res
-        
-        return pixel_res
-    
-    def resize_canvas(self):
-        """ bring UAV imagery and base map to the same lat and lon res """
-        pixel_res = self.get_UAV_res()
-        height_resize = int((self.canvas_lat_res/pixel_res)*self.canvas_height)
-        width_resize = int((self.canvas_lon_res/pixel_res)*self.canvas_width)
-        return cv2.resize(self.canvas, (width_resize, height_resize))
-    
-    def get_row_col_index(self, lat, lon, rot_im):
-        """ 
-        :param lat (float): center coord of rot_im
-        :param lon (float): center coord of rot_im
-        :param rot_im (np.ndarray): rotated image
-        returns the upp/low row and column index when provided center lat and lon values
-        """
-        nrow, ncol = rot_im.shape[0], rot_im.shape[1]
-        row_idx = int((self.upper_lat - lat)/self.pixel_res)
-        col_idx = int((lon - self.left_lon)/self.pixel_res)
-        #row_idx and col_idx wrt to center coord
-        upper_row_idx = row_idx - nrow//2
-        upper_row_idx = 0 if upper_row_idx < 0 else upper_row_idx
-        lower_row_idx = upper_row_idx + nrow
-        left_col_idx = col_idx - ncol//2
-        left_col_idx = 0 if left_col_idx < 0 else left_col_idx
-        right_col_idx = left_col_idx + ncol
-        return upper_row_idx, lower_row_idx, left_col_idx, right_col_idx
-    
-    def georeference_UAV(self,calculate_correlation=False):
-        """
-        overlay UAV imagery over basemap
-        """
-        im_display = self.resize_canvas()
-        im_display_copy = im_display.copy()
-        cc_list = []
-        for idx, gt in self.geotransform_list.items():
-            flight_angle = gt['flight_angle']
-            fp = gt['image_fp']
-            
-            if fp.endswith('.tif') or fp.endswith('.jpg'):
-                im = np.asarray(Image.open(fp)) if (os.path.exists(fp)) else None
-            
-            if im is None:
-                raise NameError("image is None because filepath d.n.e")
-            GI = FlightAttributes.GeotransformImage(im,None,None,None,angle=flight_angle)
-            rot_im = GI.affine_transformation(plot=False)
-            upper_row_idx, lower_row_idx, left_col_idx, right_col_idx = self.get_row_col_index(gt['lat'],gt['lon'],rot_im) #row/col idx wrt to center coord
-            background_im = im_display[upper_row_idx:lower_row_idx,left_col_idx:right_col_idx,:]
-            assert rot_im.shape == background_im.shape, f'shapes are diff {rot_im.shape} {background_im.shape}'
-            if calculate_correlation is True:
-                cc = correlation_coefficient(im_display_copy[upper_row_idx:lower_row_idx,left_col_idx:right_col_idx,0],rot_im[:,:,0])
-                cc_list.append((fp,cc))
-            overlay_im = np.where(rot_im == 0, background_im,rot_im)
-            im_display[upper_row_idx:lower_row_idx,left_col_idx:right_col_idx,:] = overlay_im
-
-        return im_display, cc_list
-    
-    def plot(self,ax=None,add_ticks=True, add_compass=True, add_scale_bar=True):
-        """ plot the georeferenced raster using the PlotMap plot method """
-        im_display, cc_list = self.georeference_UAV()
-        PM = PlotMap(self.ne,self.sw,im_display)
-        PM.plot(ax=ax,
-                add_ticks=add_ticks,
-                add_compass=add_compass,
-                add_scale_bar=add_scale_bar)
-        return cc_list
