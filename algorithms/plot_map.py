@@ -158,7 +158,10 @@ class GeoreferenceRaster:
         self.left_lon = self.sw[1]
 
     def get_UAV_res(self):
-        """ obtain the smallest resolution in UAV imagery """
+        """ 
+        obtain the smallest resolution in UAV imagery 
+        latitude and longitude pixel resolution must be the same becus in QGIS both resolution are the same
+        """
         pixel_res = 1
         # get the max and min lat and lon values, and the corresponding im idx
         for idx, gt in self.geotransform_list.items():

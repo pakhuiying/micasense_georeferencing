@@ -1,9 +1,17 @@
 import cameratransform as ct
 import numpy as np
+import pandas as pd
 import os
 import rasterio
 from PIL import Image
+import glob
+import contextlib
+import pickle
+from math import ceil
+import matplotlib.pyplot as plt
+import algorithms.plot_map as plot_map
 import algorithms.flight_attributes as FlightAttributes
+import algorithms.select_GPS as SelectGPS
 
 def directGeoreferencing_rasterio(imagePath,image_name,focal,lat,lon,alt,flight_angle,original_image_size=(1280,960),cropped_dimensions=(4, 6, 1240, 920)):
     """ 
@@ -92,8 +100,234 @@ def directGeoreferencing_gdal(imagePath,image_name,lat,lon,alt,flight_angle,dirn
                                 angle = flight_angle)
     GI.georegister(image_fn)
 
+def makeGif(gifParentDir,fileName):
+    # gifParentDir = os.path.join(os.path.dirname(imagePath),"images")
+    # filepaths
+    fp_in = os.path.join(gifParentDir,f'*.png') #"/path/to/image_*.png"
+    imgDir = os.path.dirname(gifParentDir)
+    gifDir = os.path.join(imgDir,"gif")
+    os.mkdir(gifDir) if not os.path.exists(gifDir) else None
+    fp_out = os.path.join(gifDir,f'{fileName}.gif')#"/path/to/image.gif"
+
+    # use exit stack to automatically close opened images
+    with contextlib.ExitStack() as stack:
+
+            # lazily load images
+            imgs = (stack.enter_context(Image.open(f))
+                    for f in sorted(glob.glob(fp_in)))
+
+            # extract  first image from iterator
+            img = next(imgs)
+
+            # https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html#gif
+            img.save(fp=fp_out, format='GIF', append_images=imgs,
+                    save_all=True, duration=200, loop=0)
+
+class BatchCorrect:
+    def __init__(self,imagePath,dirName):
+        """ 
+        :param imagePath (str): directory to image folder
+        :param dirName (str): name of directory folder
+        """
+        self.imagePath = imagePath
+        self.rawImagePath = os.path.join(imagePath,'RawImg')
+        self.flightAttributesPath = os.path.join(imagePath,'flight_attributes','flight_attributes.csv')
+        self.log = pd.read_csv(self.flightAttributesPath)
+        self.height_dict = FlightAttributes.get_heights(imagePath,self.log)
+        self.flight_points = SelectGPS.readSelectedGPS(self.rawImagePath)
+        self.dirName = dirName
+    
+    def save_data(self,dirPath,fileName, data):
+        save_fp = os.path.join(dirPath,f'{fileName}.ob')
+        with open(save_fp,'wb') as fp:
+            pickle.dump(data,fp)
+        return
+
+    def get_distance_interpolation(self,interpolate_distance = 0.01,pad_distance = 1.5):
+        IC = FlightAttributes.InterpolateCoordinates(self.log, 
+                                interpolate_distance=interpolate_distance, 
+                                pad_distance=pad_distance)
+        interp_dist_dict = IC.get_interpolated_dict()
+        self.interp_dist_dict = interp_dist_dict
+        self.IC = IC
+        return interp_dist_dict
+    
+    def get_time_interpolation(self):
+        IF = FlightAttributes.InterpolateFlight(self.log, 
+                                                interpolate_milliseconds=100)
+        df_interpolated = IF.interpolate_flight(plot=False)
+        return df_interpolated
+    
+    def shift_coord(self, shift_n):
+        df_interpolated = self.IC.shift_coord(self.interp_dist_dict, shift_n=shift_n)
+        # crop df based on selected flight points
+        df_cropped = df_interpolated.iloc[self.flight_points,:]
+        return df_cropped
+    
+    def time_delay(self,df_interpolated,timedelta):
+        df1 = FlightAttributes.time_delta_correction(df_interpolated, timedelta=timedelta, 
+                        columns_to_shift = ['timestamp', 'timedelta', 'latitude', 'longitude'])
+        df_cropped = df1.iloc[self.flight_points,:]
+        return df_cropped
+    
+    def get_geotransform(self,df_cropped):
+        PG = FlightAttributes.PlotGeoreference(self.imagePath,df_cropped)
+        geotransform_list = PG.get_flight_attributes()
+        return geotransform_list
+
+    def georeference_UAV(self,ne_point,sw_point,canvas, df_cropped, calculate_correlation=False):
+        """ 
+        returns the canvas with the UAV images plotted on top of it,
+        and correlation coefficient of each image with the canvas
+        """
+        self.ne = ne_point
+        self.sw = sw_point
+        geotransform_list = self.get_geotransform(df_cropped)
+        GR = plot_map.GeoreferenceRaster(ne_point,sw_point,canvas,geotransform_list)
+        im_display, cc_list = GR.georeference_UAV(calculate_correlation=calculate_correlation)
+        return im_display, cc_list
+    
+    def plot_params(self, PM, ax, ax_idx, title):
+        
+        tickFontSize = 7
+        tick_breaks = 4
+        NorthFontSize = 7
+        triangleFontSize = 5
+        scaleBarFontSize = 8
+        scaleBarWidth = 3
+        n_fig = 8
+
+        PM.plot(ax=ax,add_ticks=False,add_compass=False,add_scale_bar=False)
+                
+        # set compass
+        PM.add_compass(ax=ax,fontsize_N=NorthFontSize,fontsize_triangle=triangleFontSize)
+        # set north
+        PM.add_scale_bar(ax=ax,fontsize=scaleBarFontSize,lw=scaleBarWidth)
+        # set subfigure title
+        subfig_title = chr(ord('a') + ax_idx)
+        ax.set_title(f'({subfig_title}) {title}')
+        
+        # add ticks for border plots
+        if ax_idx == 0:
+            PM.add_ticks(ax=ax,fontsize=tickFontSize,tick_breaks=tick_breaks,add_xticks=False)
+        elif ax_idx == n_fig//2:
+            PM.add_ticks(ax=ax,fontsize=tickFontSize,tick_breaks=tick_breaks)
+        elif ax_idx > n_fig//2:
+            PM.add_ticks(ax=ax,fontsize=tickFontSize,tick_breaks=tick_breaks,add_yticks=False)
+        else:
+            PM.add_ticks(ax=ax,fontsize=tickFontSize,tick_breaks=tick_breaks,add_yticks=False, add_xticks= False)
+        return
+
+    def main_timeDelay(self, modify_df,ne_point,sw_point,canvas, calculate_correlation=True):
+        """ 
+        :param modify_df (func): modify_df is a function to import an external function to modify the df
+        """
+        height_steps = 6
+        est_time_delay1 = 0
+        est_time_delay2 = -2
+        n_fig = 8
+        
+        df_interpolated = self.get_time_interpolation()
+
+        height_dict = dict()
+        for height in range(height_steps): # try offsets in height of up to 5m by 1meters
+            DEM_offset_height = self.height_dict['DEM_offset_height'] - height
+            
+            timeDelay_dict = dict()
+
+            fig, axes = plt.subplots(2,ceil(n_fig/2), figsize=(16,7))
+
+            for i, (td,ax) in enumerate(zip(np.linspace(est_time_delay2,est_time_delay1, n_fig),axes.flatten())):
+                df_cropped = self.time_delay(df_interpolated,timedelta=td)
+                df_cropped = modify_df(df_cropped, DEM_offset_height)
+                im_display, cc_list = self.georeference_UAV(ne_point, sw_point, canvas, 
+                                                            df_cropped, 
+                                                            calculate_correlation)
+                td_str = f'{abs(td):.3f}'
+                timeDelay_dict[td_str] = cc_list
+                PM = plot_map.PlotMap(ne_point,sw_point,im_display)
+                # add plot params
+                self.plot_params(PM, ax, ax_idx=i, title=f'Time: {td_str}')
+
+            # add fig title
+            correctedHeight = int(self.height_dict['measuredHeight'] - DEM_offset_height)
+            fig.suptitle(f"Height: {self.height_dict['actualHeight']}m, Corrected height: {correctedHeight}m")
+            plt.tight_layout()
+            plt.show()
+
+            # save cc list
+            height_dict[correctedHeight] = timeDelay_dict
+
+            # save fig
+            parentDir = os.path.join(self.imagePath,"images",self.dirName)
+            os.mkdir(parentDir) if not os.path.exists(parentDir) else None
+            fname = os.path.join(parentDir,f'offsetHeight{int(DEM_offset_height)}.png')
+            fig.savefig(fname)
+
+        # save cc list on disk
+        self.save_data(parentDir,'cc_list',height_dict)
+        
+        # create gifs
+        makeGif(parentDir,self.dirName)
+
+    def main_shiftCoord(self, modify_df,ne_point,sw_point,canvas, calculate_correlation=True):
+        """ 
+        :param modify_df (func): modify_df is a function to import an external function to modify the df
+        """
+        height_steps = 6
+        dist1 = 0
+        dist2 = 70
+        n_fig = 8
+        
+        self.get_distance_interpolation()
+
+        height_dict = dict()
+        for height in range(height_steps): # try offsets in height of up to 5m by 1meters
+            DEM_offset_height = self.height_dict['DEM_offset_height'] - height
+            
+            shift_n_dict = dict()
+
+            fig, axes = plt.subplots(2,ceil(n_fig/2), figsize=(16,7))
+
+            for i, (shift_n , ax) in enumerate(zip(np.linspace(dist1,dist2,n_fig,dtype=int),axes.flatten())):
+                try:
+                    df_cropped = self.shift_coord(shift_n)
+                    df_cropped = modify_df(df_cropped, DEM_offset_height)
+                    im_display, cc_list = self.georeference_UAV(ne_point, sw_point, canvas, 
+                                                                df_cropped, 
+                                                                calculate_correlation)
+                    shift_n_dict[shift_n] = cc_list
+                    PM = plot_map.PlotMap(ne_point,sw_point,im_display)
+                    # add plot params
+                    self.plot_params(PM, ax, ax_idx=i, title=f'Shift: {shift_n}')
+                except:
+                    ax.axis('off')
+                    pass
+
+            # add fig title
+            correctedHeight = int(self.height_dict['measuredHeight'] - DEM_offset_height)
+            fig.suptitle(f"Height: {self.height_dict['actualHeight']}m, Corrected height: {correctedHeight}m")
+            plt.tight_layout()
+            plt.show()
+
+            # save cc list
+            height_dict[correctedHeight] = shift_n_dict
+
+            # save fig
+            parentDir = os.path.join(self.imagePath,"images",self.dirName)
+            os.mkdir(parentDir) if not os.path.exists(parentDir) else None
+            fname = os.path.join(parentDir,f'offsetHeight{int(DEM_offset_height)}.png')
+            fig.savefig(fname)
+
+        # save cc list on disk
+        self.save_data(parentDir,'cc_list',height_dict)
+        
+        # create gifs
+        makeGif(parentDir,self.dirName)
+
+
 class MosaicSeadron:
-    def __init__(self,lat,lon,alt,flight_angle,focal=5.4,sensor_size=(3.75, 3.75),original_image_size=(1280,960),cropped_dimensions=(4, 6, 1240, 920)):
+    def __init__(self,lat,lon,alt,flight_angle,flight_angle_correction = -90,focal=5.4,sensor_size=(3.75, 3.75),original_image_size=(1280,960),cropped_dimensions=(4, 6, 1240, 920)):
         """ 
         :param focal (float): local length of camera
         :param original_image_size (tuple): original image_size = ImageWidth, ImageHeight
@@ -109,6 +343,7 @@ class MosaicSeadron:
         self.lon = lon
         self.alt = alt
         self.flight_angle = flight_angle
+        self.flight_angle_correction = flight_angle_correction
         self.focal = focal
         self.sensor_size = sensor_size
         self.original_image_size = original_image_size
@@ -126,7 +361,7 @@ class MosaicSeadron:
                         ct.SpatialOrientation(elevation_m=self.alt,
                                             tilt_deg=0,
                                             roll_deg=0,
-                                        heading_deg=self.flight_angle))
+                                        heading_deg=self.flight_angle+self.flight_angle_correction))
         
         cam.setGPSpos(self.lat, self.lon, self.alt) #cam coord matches with the image's center GPS coordinate
 
@@ -149,6 +384,24 @@ class MosaicSeadron:
 
         return [gcp1, gcp2, gcp3, gcp4]
     
+    def get_geotransform(self, image_fp):
+        """ 
+        obtain the smallest resolution in UAV imagery 
+        latitude and longitude pixel resolution must be the same becus in QGIS both resolution are the same
+        """
+        cam = self.get_cam()
+        UL_coord = cam.gpsFromImage([0, 0])
+        LR_coord = cam.gpsFromImage([self.original_image_size[0] - 1, self.original_image_size[1] - 1])
+        UL_delta_coord = cam.gpsFromImage([1, 1])
+
+        lat_res = abs(UL_coord[0] - UL_delta_coord[0])#/self.original_image_size[0]
+        lon_res = abs(UL_coord[1] - UL_delta_coord[1])#/self.original_image_size[1]
+        pix_res = (lat_res + lon_res)/2
+        center_coord_lat = (UL_coord[0] + LR_coord[0])/2
+        center_coord_lon = (UL_coord[1] + LR_coord[1])/2
+        return {'lat': center_coord_lat, 'lon': center_coord_lon, 
+                'lat_res': pix_res, 'lon_res': pix_res, 
+                'flight_angle': self.flight_angle, 'image_fp': image_fp}
 
     def get_affine_transform(self):
         return rasterio.transform.from_gcps(self.get_gcps())
