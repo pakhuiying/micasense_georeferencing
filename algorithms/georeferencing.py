@@ -202,6 +202,7 @@ class BatchCorrect:
         scaleBarFontSize = 8
         scaleBarWidth = 3
         n_fig = 8
+        title_fontSize = 15
 
         PM.plot(ax=ax,add_ticks=False,add_compass=False,add_scale_bar=False)
                 
@@ -211,7 +212,8 @@ class BatchCorrect:
         PM.add_scale_bar(ax=ax,fontsize=scaleBarFontSize,lw=scaleBarWidth)
         # set subfigure title
         subfig_title = chr(ord('a') + ax_idx)
-        ax.set_title(f'({subfig_title}) {title}')
+        ax.set_title(f'({subfig_title}) {title}',
+                     fontdict={'fontsize': title_fontSize, 'fontweight': 'medium'})
         
         # add ticks for border plots
         if ax_idx == 0:
@@ -224,14 +226,11 @@ class BatchCorrect:
             PM.add_ticks(ax=ax,fontsize=tickFontSize,tick_breaks=tick_breaks,add_yticks=False, add_xticks= False)
         return
 
-    def main_timeDelay(self, modify_df,ne_point,sw_point,canvas, calculate_correlation=True):
+    def main_timeDelay(self, modify_df,ne_point,sw_point,canvas, calculate_correlation=True,
+                       height_steps = 6,est_time_delay1 = 0,est_time_delay2 = -2, n_fig = 8):
         """ 
         :param modify_df (func): modify_df is a function to import an external function to modify the df
         """
-        height_steps = 6
-        est_time_delay1 = 0
-        est_time_delay2 = -2
-        n_fig = 8
         
         df_interpolated = self.get_time_interpolation()
 
@@ -242,8 +241,8 @@ class BatchCorrect:
             timeDelay_dict = dict()
 
             fig, axes = plt.subplots(2,ceil(n_fig/2), figsize=(16,7))
-
-            for i, (td,ax) in enumerate(zip(np.linspace(est_time_delay2,est_time_delay1, n_fig),axes.flatten())):
+            axes_flatten = axes.flatten()
+            for i, (td,ax) in enumerate(zip(np.linspace(est_time_delay2,est_time_delay1, n_fig),reversed(axes_flatten))):
                 df_cropped = self.time_delay(df_interpolated,timedelta=td)
                 df_cropped = modify_df(df_cropped, DEM_offset_height)
                 im_display, cc_list = self.georeference_UAV(ne_point, sw_point, canvas, 
@@ -253,11 +252,13 @@ class BatchCorrect:
                 timeDelay_dict[td_str] = cc_list
                 PM = plot_map.PlotMap(ne_point,sw_point,im_display)
                 # add plot params
-                self.plot_params(PM, ax, ax_idx=i, title=f'Time: {td_str}')
+                self.plot_params(PM, ax, ax_idx=n_fig-1-i, title=f'Time: {td_str}')
 
             # add fig title
+            suptitle_fontSize = 18
             correctedHeight = int(self.height_dict['measuredHeight'] - DEM_offset_height)
-            fig.suptitle(f"Height: {self.height_dict['actualHeight']}m, Corrected height: {correctedHeight}m")
+            fig.suptitle(f"Height: {self.height_dict['actualHeight']}m, Corrected height: {correctedHeight}m",
+                         fontsize=suptitle_fontSize)
             plt.tight_layout()
             plt.show()
 
@@ -311,8 +312,10 @@ class BatchCorrect:
                     pass
 
             # add fig title
+            suptitle_fontSize = 18
             correctedHeight = int(self.height_dict['measuredHeight'] - DEM_offset_height)
-            fig.suptitle(f"Height: {self.height_dict['actualHeight']}m, Corrected height: {correctedHeight}m")
+            fig.suptitle(f"Height: {self.height_dict['actualHeight']}m, Corrected height: {correctedHeight}m",
+                         fontsize=suptitle_fontSize)
             plt.tight_layout()
             plt.show()
 
