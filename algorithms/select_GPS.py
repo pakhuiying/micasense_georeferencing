@@ -2,6 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import os
 import numpy as np
+import sys
 
 def readSelectedGPS(imagePath):
     """
@@ -198,4 +199,4 @@ def import_gps(image_file_path):
         return df,parent_dir
     
 if __name__ == "__main__":
-    draw_plot(r"D:\EPMC_flight\pandanRes\45angle_35H_70overlap\flight_attributes")
+    draw_plot(sys.argv[1])

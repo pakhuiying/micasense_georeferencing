@@ -1,4 +1,5 @@
 test_georeferencing.qgz
 georeferencing.pptx
 __pycache__
-test.ipynb
+test*.ipynb
+mutils.ipynb
