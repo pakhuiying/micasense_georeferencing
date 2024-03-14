@@ -125,6 +125,38 @@ class PlotMap:
                     path_effects=self.buffer(6))
         return
     
+    def add_wql_points(self,ax, wql_dict, font_size=16, cbar_tick_font_size=10, cbar_label_font_size=12,
+                       bbox_to_anchor=(0.5,-0.2),wql_label="Turbidity (NTU)",**kwargs):
+        """
+        overlay points over canvas given coordinates and corresponding wql concentration
+        :param wql_dict (dict): where keys are: lat, lon, measurements; values are list of float
+        """
+        tss_lat = wql_dict['lat']
+        tss_lon = wql_dict['lon']
+        tss_measurements = wql_dict['measurements']
+        rows_idx = []
+        cols_idx = []
+        tss_idx = []
+        for i in range(len(tss_lat)):
+            lat = tss_lat[i]
+            lon = tss_lon[i]
+            if lat > self.ne[0] or lat < self.sw[0]:
+                continue
+            if lon > self.ne[1] or lon < self.sw[1]:
+                continue
+            row_idx = int((self.ne[0] - lat)/self.lat_res_per_pixel)
+            col_idx = int((lon - self.sw[1])/self.lon_res_per_pixel)
+            rows_idx.append(row_idx)
+            cols_idx.append(col_idx)
+            tss_idx.append(tss_measurements[i])
+        
+        im = ax.scatter(cols_idx,rows_idx,c=tss_idx,alpha=0.5,label='in-situ sampling',**kwargs)
+        ax.legend(loc='lower center',bbox_to_anchor=bbox_to_anchor,prop={'size': font_size})
+        axcb = plt.colorbar(im,ax=ax)
+        axcb.ax.tick_params(labelsize=cbar_tick_font_size)
+        axcb.set_label(wql_label,size=cbar_label_font_size)
+        return
+    
     def plot(self,ax=None,add_ticks=True, add_compass=True, add_scale_bar=True):
 
         # plot
