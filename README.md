@@ -1,5 +1,5 @@
 ![abstract](plots/graphical%20abstract.jpg)
-Source: Pak, Lin & Law (2024) Correction of systematic image misalignment in direct georeferencing of UAV imagery (manuscript in preparation)
+Source: Pak, H. Y., Lin, W., & Law, A. W. K. (2024). Correction of systematic image misalignment in direct georeferencing of UAV multispectral imagery. International Journal of Remote Sensing, 46(3), 930–952. https://doi.org/10.1080/01431161.2024.2440944
 
 # Set up
 
